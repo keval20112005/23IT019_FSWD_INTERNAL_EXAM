@@ -1,0 +1,74 @@
+pipeline {
+    agent {
+        docker {
+            image 'deepeshgodhwani/custom-image:latest'
+            args '--user root -v /var/run/docker.sock:/var/run/docker.sock'
+        }
+    }
+
+    environment {
+        GIT_CREDENTIALS_ID = 'github_credentials'
+        DOCKER_CREDENTIALS_ID = 'docker_hub_credentials'
+        DOCKER_REPO = "deepeshgodhwani"
+        FRONTEND_IMAGE = 'qr-scanner'
+        EMAIL_RECIPIENT = "deepeshgodhwani28@gmail.com"
+        AWS_REGION = 'eu-north-1' // e.g., 'us-west-2'
+        EC2_INSTANCE_IP = '13.60.92.96' // Replace with your EC2 instance's public IP
+        AWS_CREDENTIALS_ID = 'aws-credentials' // Jenkins AWS credentials ID    
+    }
+
+    stages {
+        stage('Checkout SCM') {
+            steps {
+                checkout([$class: 'GitSCM',
+                          branches: [[name: '*/main']],
+                          userRemoteConfigs: [[url: 'https://github.com/Deepeshgodhwani/QR-Code-Generator-and-Scanner',
+                                               credentialsId: "${env.GIT_CREDENTIALS_ID}"]]
+                ])
+            }
+        }
+
+        stage("Build") {
+            steps {
+                // Fix npm permission issue
+                sh 'rm -rf node_modules'
+                sh 'npm install'
+                sh 'docker build -t ${DOCKER_REPO}/${FRONTEND_IMAGE}:${BUILD_NUMBER} .'
+            }
+        }
+
+        stage("Push image to Docker Hub") {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_CREDENTIALS_ID}") {
+                        sh 'docker push ${DOCKER_REPO}/${FRONTEND_IMAGE}:${BUILD_NUMBER}'
+                    }
+                }
+            }
+        }
+
+        stage("Deploy to EC2") {
+            steps {
+                script {
+                    // Use AWS credentials for SSH access
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'SSH_KEY')]) {
+                        // SSH into EC2 instance and deploy the Docker image
+                        sh """
+                            ssh -o StrictHostKeyChecking=no -i ${SSH_KEY} ubuntu@${EC2_INSTANCE_IP} << 'EOF'
+                                # Stop the existing container if it exists
+                                docker stop ${FRONTEND_IMAGE} || true
+                                docker rm ${FRONTEND_IMAGE} || true
+                                
+                                # Pull the latest Docker image from Docker Hub
+                                docker pull ${DOCKER_REPO}/${FRONTEND_IMAGE}:${BUILD_NUMBER}
+                                
+                                # Run the new container
+                                docker run -d --name ${FRONTEND_IMAGE} -p 3000:3000 ${DOCKER_REPO}/${FRONTEND_IMAGE}:${BUILD_NUMBER}
+                            EOF
+                        """
+                    }
+                }
+            }
+        }
+    }
+}
